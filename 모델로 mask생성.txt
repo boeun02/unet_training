@@ -1,0 +1,155 @@
+import os
+import time
+import numpy as np
+import cv2
+from glob import glob
+from tqdm import tqdm
+import tensorflow as tf
+
+os.environ["PYTHONHASHSEED"] = str(42)
+np.random.seed(42)
+tf.random.set_seed(42)
+
+height = 3072
+width = 1996
+
+dataset_path = r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug/new/images"
+save_path = r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug/new/masks"
+model_path = r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug/unet-non-aug.h5"
+
+def create_dir (path):
+  if not os.path.exists(path):
+    os.makedirs(path)
+
+create_dir(save_path)
+
+model = tf.keras.models.load_model(model_path)
+
+model.summary()
+
+test_x = sorted(glob(os.path.join(dataset_path, "*.jpg")))
+print(f"Test Images: {len(test_x)}")
+
+time_taken = []
+
+for x in tqdm(test_x):
+  name = x.split("/")[-1]
+
+  x = cv2.imread(x, cv2.IMREAD_COLOR)
+  x = cv2.resize(x, (256, 384)) #모델 크기에 맞게 테스트 이미지 크기 조정
+  x = x/255.0
+  x = np.expand_dims(x, axis=0)
+
+  start_time = time.time()
+  p = model.predict(x)[0]
+  total_time = time.time() - start_time
+  time_taken.append(total_time)
+
+  p = p > 0.5
+  p = p * 255
+
+  cv2.imwrite(os.path.join(save_path, name), p)
+
+mean_time = np.mean(time_taken)
+mean_fps = 1/mean_time
+
+print(f"Mean Time: {mean_time: 1.5f} - Mean FPS: {mean_fps: 2.5f}")
+
+-------------------------------------------------------------------------
+
+컬러로 바꾼 버전
+
+import os
+import time
+import numpy as np
+import cv2
+from glob import glob
+from tqdm import tqdm
+import tensorflow as tf
+import csv
+
+os.environ["PYTHONHASHSEED"] = str(42)
+np.random.seed(42)
+tf.random.set_seed(42)
+
+height = 384
+width = 256
+num_classes = 13
+
+dataset_path = r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug/new/images"
+save_path = r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug/new/masks"
+model_path = r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug/unet-non-aug.h5"
+
+def create_dir (path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+create_dir(save_path)
+
+model = tf.keras.models.load_model(model_path)
+
+model.summary()
+
+test_x = sorted(glob(os.path.join(dataset_path, "*.jpg")))
+print(f"Test Images: {len(test_x)}")
+
+time_taken = []
+
+# 제공된 클래스 색상 정의 (B, G, R 형식)
+class_colors = [
+    (0, 0, 0), (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
+    (255, 0, 255), (0, 255, 255), (100, 100, 255),
+    (100, 255, 100), (255, 100, 100), (100, 255, 255),
+    (255, 100, 255), (255, 255, 100), (100, 100, 100)
+]
+
+for x in tqdm(test_x):
+    name = x.split("/")[-1]
+
+    x = cv2.imread(x, cv2.IMREAD_COLOR)
+    x = cv2.resize(x, (width, height))
+    x = x / 255.0
+    x = np.expand_dims(x, axis=0)
+
+    start_time = time.time()
+    prediction = model.predict(x)[0]
+    total_time = time.time() - start_time
+    time_taken.append(total_time)
+
+    # 마스크 초기화 (배경을 검은색으로 설정)
+    mask = np.zeros((height, width, 3), dtype=np.uint8)
+
+    # 가장 높은 확률을 가진 클래스에 대한 인덱스를 얻습니다
+    class_indices = np.argmax(prediction, axis=-1)
+
+    for i in range(height):
+      for j in range(width):
+          class_idx = class_indices[i, j]
+          mask[i, j] = class_colors[class_idx]
+          if i % 100 == 0 and j % 100 == 0:  # 로그 출력
+              print(f"Pixel at ({i},{j}): Class {class_idx}, Color {class_colors[class_idx]}")
+
+
+    cv2.imwrite(os.path.join(save_path, name), mask)
+
+     # CSV 파일에 저장할 픽셀별 클래스 정보
+    pixel_class_info = []
+
+    for i in range(height):
+        for j in range(width):
+            class_idx = class_indices[i, j]
+            
+            # 각 픽셀의 클래스 정보를 리스트에 추가
+            pixel_class_info.append([i, j, class_idx])
+
+    # CSV 파일로 픽셀별 클래스 정보 저장
+    csv_filename = os.path.join(save_path, f"{name.split('.')[0]}_class_info.csv")
+    with open(csv_filename, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Row", "Column", "Class_Index"])
+        writer.writerows(pixel_class_info)
+
+mean_time = np.mean(time_taken)
+mean_fps = 1 / mean_time
+
+print(f"Mean Time: {mean_time:.5f} - Mean FPS: {mean_fps:.5f}")

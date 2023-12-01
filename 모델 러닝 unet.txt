@@ -1,0 +1,353 @@
+import os
+import numpy as np
+import cv2
+from glob import glob
+import tensorflow as tf
+from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPool2D, Conv2DTranspose, Concatenate, Input
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, CSVLogger
+
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+  try:
+    # 필요할 때 메모리를 할당하도록 설정
+    for gpu in gpus:
+      tf.config.experimental.set_memory_growth(gpu, True)
+  except RuntimeError as e:
+    print(e)
+
+os.environ["PYTHONHASHSEED"] = str(42)
+np.random.seed(42)
+tf.random.set_seed(42)
+
+batch_size = 8
+lr = 1e-4 #0.0001
+epochs = 100
+height = 384
+width = 256
+
+dataset_path = r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug"
+
+files_dir = os.path.join("files", "non-aug")
+model_file = os.path.join(files_dir, "unet-non-aug.h5")
+log_file = os.path.join(files_dir, "log-non-aug.csv")
+
+def create_dir(path):
+  if not os.path.exists(path):
+    os.makedirs(path)
+
+create_dir(files_dir)
+
+def conv_block(inputs, num_filters):
+  x = Conv2D(num_filters, 3, padding="same")(inputs)
+  x = BatchNormalization()(x)
+  x = Activation("relu")(x)
+
+  x = Conv2D(num_filters,3, padding="same")(x)
+  x = BatchNormalization()(x)
+  x = Activation("relu")(x)
+
+  return x
+
+def encoder_block(inputs, num_filters):
+  x = conv_block(inputs, num_filters)
+  p = MaxPool2D((2, 2))(x)
+  return x, p
+
+def decoder_block(inputs, skip, num_filters):
+  x = Conv2DTranspose(num_filters, (2, 2), strides=2, padding="same")(inputs)
+  x = Concatenate()([x, skip])
+  x = conv_block(x, num_filters)
+  return x
+
+def build_unet(input_shape):
+  inputs = Input(input_shape)
+
+  """Encoder"""
+  s1, p1 = encoder_block(inputs, 64)
+  s2, p2 = encoder_block(p1, 128)
+  s3, p3 = encoder_block(p2, 256)
+  s4, p4 = encoder_block(p3, 512)
+
+  """Bridge"""
+  b1 = conv_block(p4, 1024)
+
+  """Decoder"""
+  d1 = decoder_block(b1, s4, 512)
+  d2 = decoder_block(d1, s3, 256)
+  d3 = decoder_block(d2, s2, 128)
+  d4 = decoder_block(d3, s1, 64)
+
+  outputs = Conv2D(1, 1, padding="same", activation="sigmoid")(d4)
+  model = Model(inputs, outputs, name="UNET")
+  return model
+
+def load_data(path):
+    train_x = sorted(glob(os.path.join(path, "train", "images", "*.jpg")))
+    train_y = sorted(glob(os.path.join(path, "train", "masks", "*.png")))
+
+    test_x = sorted(glob(os.path.join(path, "test", "images", "*.jpg")))
+    test_y = sorted(glob(os.path.join(path, "test", "masks", "*.png")))
+    return (train_x, train_y), (test_x, test_y)
+
+def read_image(path):
+    path = path.decode()
+    x = cv2.imread(path, cv2.IMREAD_COLOR)
+    x = cv2.resize(x, (256, 384)) # 너비와 높이를 줄입니다.
+    x = x / 255.0
+    return x
+
+def read_mask(path):
+    path = path.decode()
+    x = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    x = cv2.resize(x, (256, 384)) # 너비와 높이를 줄입니다.
+    x = x / 255.0
+    x = np.expand_dims(x, axis=-1)
+    return x
+
+def tf_parse(x, y):
+  def _parse(x, y):
+    x = read_image(x)
+    y = read_mask(y)
+    return x, y
+
+  x, y = tf.numpy_function(_parse, [x, y], [tf.float64, tf.float64])
+  x.set_shape([height, width, 3])
+  y.set_shape([height, width, 1])
+
+  return x, y
+
+def tf_dataset(x, y, batch=8):
+  dataset = tf.data.Dataset.from_tensor_slices((x, y))
+  dataset = dataset.map(tf_parse, num_parallel_calls=tf.data.AUTOTUNE)
+  dataset = dataset.batch(batch)
+  dataset = dataset.prefetch(tf.data.AUTOTUNE)
+  return dataset
+
+(train_x, train_y), (test_x, test_y) = load_data(dataset_path)
+print(f"Train: {len(train_x)} - {len(train_y)}")
+print(f"Test: {len(test_x)} - {len(test_y)}")
+
+train_dataset = tf_dataset(train_x, train_y, batch=batch_size)
+test_dataset = tf_dataset(test_x, test_y, batch=batch_size)
+
+for x, y in test_dataset:
+  print(x.shape, y.shape)
+
+input_shape = (height, width, 3)
+model = build_unet(input_shape)
+
+model.summary()
+
+opt = tf.keras.optimizers.Adam(lr)
+
+model.compile(loss="binary_crossentropy", optimizer=opt, metrics=["acc"])
+
+callbacks = [
+    ModelCheckpoint(model_file, verbose=1, save_best_only=True, monitor='val_loss'),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=4),
+    CSVLogger(log_file),
+    EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=False)
+]
+
+model.fit(
+    train_dataset,
+    validation_data=test_dataset,
+    epochs=epochs,
+    callbacks=callbacks
+)
+
+
+--------------------------------------------------------------------------------------
+
+import os
+import numpy as np
+import cv2
+from glob import glob
+import tensorflow as tf
+from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPool2D, Conv2DTranspose, Concatenate, Input, Dropout, Lambda
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, CSVLogger
+
+# GPU 설정
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(e)
+
+# 고정된 시드 값
+os.environ["PYTHONHASHSEED"] = str(42)
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# 하이퍼파라미터 설정
+batch_size = 8
+lr = 1e-4
+epochs = 100
+height = 384
+width = 256
+num_classes = 13
+
+# 데이터셋 경로
+dataset_path = r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug"
+
+# 모델 및 로그 파일 경로
+files_dir = os.path.join(r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug", "non-aug")
+model_file = os.path.join(r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug", "unet-non-aug.h5")
+log_file = os.path.join(r"/content/drive/MyDrive/006_BMS2/0002_latxray_training/dataset/non-aug", "log-non-aug.csv")
+
+# 디렉터리 생성 함수
+def create_dir(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+create_dir(files_dir)
+
+# Convolution Block
+def conv_block(inputs, num_filters):
+    x = Conv2D(num_filters, 3, padding="same")(inputs)
+    x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+    x = Conv2D(num_filters, 3, padding="same")(x)
+    x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+    return x
+
+# Encoder Block
+def encoder_block(inputs, num_filters):
+    x = conv_block(inputs, num_filters)
+    p = MaxPool2D((2, 2))(x)
+    return x, p
+
+# Decoder Block
+def decoder_block(inputs, skip, num_filters):
+    x = Conv2DTranspose(num_filters, (2, 2), strides=2, padding="same")(inputs)
+    # Conv2DTranspose의 출력 크기 조정
+    x = tf.image.resize(x, [tf.shape(skip)[1], tf.shape(skip)[2]], method='nearest')
+    x = Concatenate()([x, skip])
+    x = conv_block(x, num_filters)
+    return x
+
+# U-Net Model
+def build_unet(input_shape):
+    inputs = Input(input_shape)
+
+    # Encoder
+    s1, p1 = encoder_block(inputs, 64)
+    s2, p2 = encoder_block(p1, 128)
+    s3, p3 = encoder_block(p2, 256)
+    s4, p4 = encoder_block(p3, 512)
+
+    # Bridge
+    b1 = conv_block(p4, 1024)
+
+    # Decoder
+    d1 = decoder_block(b1, s4, 512)
+    d2 = decoder_block(d1, s3, 256)
+    d3 = decoder_block(d2, s2, 128)
+    d4 = decoder_block(d3, s1, 64)
+
+    # Output
+    outputs = Conv2D(num_classes, 1, padding="same", activation="softmax")(d4)
+    model = Model(inputs, outputs, name="UNET")
+    return model
+
+# Data Loading and Preprocessing
+def load_data(path):
+    train_x = sorted(glob(os.path.join(path, "train", "images", "*.jpg")))
+    train_y = sorted(glob(os.path.join(path, "train", "masks", "*.png")))
+
+    test_x = sorted(glob(os.path.join(path, "test", "images", "*.jpg")))
+    test_y = sorted(glob(os.path.join(path, "test", "masks", "*.png")))
+    return (train_x, train_y), (test_x, test_y)
+
+def read_image(path):
+    # path.numpy().decode() 대신에 바로 경로를 사용
+    x = cv2.imread(path.decode(), cv2.IMREAD_COLOR)
+    x = cv2.resize(x, (width, height))
+    x = x / 255.0
+    x = x.astype(np.float32) # 데이터 타입을 float32로 변경
+    return x
+
+def read_mask(path):
+    path = path.decode()
+    mask = cv2.imread(path, cv2.IMREAD_COLOR)
+    mask = cv2.resize(mask, (width, height))
+    mask = mask.astype(np.uint8)  # 정수형으로 변환
+
+    # 클래스별 색상 정의
+    class_colors = {
+        (255, 0, 0): 0,  # S1
+        (0, 255, 0): 1,  # L5
+        (0, 0, 255): 2,  # L4
+        (255, 255, 0): 3,  # L3
+        (255, 0, 255): 4,  # L2
+        (0, 255, 255): 5,  # L1
+        (100, 100, 255): 6,  # T12
+        (100, 255, 100): 7,  # T11
+        (255, 100, 100): 8,  # T10
+        (100, 255, 255): 9,  # T9
+        (255, 100, 255): 10, # latLSpine
+        (255, 255, 100): 11, # latSacrum
+        (100, 100, 100): 12  # Aorticcalcification
+    }
+
+    # 색상을 클래스 인덱스로 변환
+    class_mask = np.zeros((mask.shape[0], mask.shape[1]), dtype=np.int32)
+    for color, class_idx in class_colors.items():
+        equality = np.equal(mask, color)
+        class_mask[np.all(equality, axis=-1)] = class_idx
+    
+    class_mask = class_mask.astype(np.float32) #  여기서 데이터 타입을 float32로 설정
+    class_mask = np.expand_dims(class_mask, axis=-1)  # 새로운 차원 추가
+    return class_mask
+
+
+def tf_parse(x, y):
+    def _parse(x, y):
+        x = read_image(x)
+        y = read_mask(y)
+        return x, y
+
+    x, y = tf.numpy_function(_parse, [x, y], [tf.float32, tf.float32])
+    x.set_shape([height, width, 3])
+    y.set_shape([height, width, 1])
+    return x, y
+
+def tf_dataset(x, y, batch=8):
+    dataset = tf.data.Dataset.from_tensor_slices((x, y))
+    dataset = dataset.map(tf_parse, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.batch(batch)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    return dataset
+
+# Data Load and Dataset Creation
+(train_x, train_y), (test_x, test_y) = load_data(dataset_path)
+train_dataset = tf_dataset(train_x, train_y, batch=batch_size)
+test_dataset = tf_dataset(test_x, test_y, batch=batch_size)
+
+# Model Build and Compile
+model = build_unet((height, width, 3))
+opt = tf.keras.optimizers.Adam(lr)
+model.compile(loss="sparse_categorical_crossentropy", optimizer=opt, metrics=["acc"])
+
+# Callback Functions and Model Training
+callbacks = [
+    ModelCheckpoint(model_file, verbose=1, save_best_only=True, monitor='val_loss'),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=4),
+    CSVLogger(log_file),
+    EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=False)
+]
+
+# Model Training
+model.fit(
+    train_dataset,
+    validation_data=test_dataset,
+    epochs=epochs,
+    callbacks=callbacks
+)
+
+컬러마스크 수정 본
