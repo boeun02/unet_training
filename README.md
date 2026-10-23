@@ -19,7 +19,7 @@ Developed during a part-time AI developer role at a medical AI startup (Oct 2023
 | **Model** | U-Net implemented from scratch (TensorFlow/Keras) |
 | **Environment** | Google Colab (GPU) |
 
-A YOLOv8-seg model was trained on the same images for comparison (19 classes, including surgical implants such as screws and cages): [yolo_for_latxray](https://github.com/boeun02/yolo_for_latxray).
+To weigh segmentation quality against inference speed, a YOLOv8-seg model was developed in parallel as an alternative approach ([yolo_for_latxray](https://github.com/boeun02/yolo_for_latxray)). Based on a qualitative comparison of the predicted masks, U-Net was selected for the final pipeline.
 
 ## Pipeline
 
